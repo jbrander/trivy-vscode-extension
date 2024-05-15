@@ -2,7 +2,9 @@ import * as vscode from 'vscode';
 import * as child from 'child_process';
 import { v4 as uuid } from 'uuid';
 import * as path from 'path';
-import { unlinkSync, readdirSync } from 'fs';
+import { unlinkSync, readdirSync, existsSync, readFileSync} from 'fs';
+import { applyDiagnostics } from './diagnostics'; 
+import { processResult } from './explorer/trivy_result';
 
 export class TrivyWrapper {
     private workingPath: string[] = [];
@@ -24,7 +26,22 @@ export class TrivyWrapper {
         }
     }
 
-    run() {
+    run(targetFile?: vscode.Uri) {
+        if (targetFile) {
+            this.fileScan(targetFile);
+        } else {
+            this.workspaceScan();
+        }
+    }
+
+    showCurrentTrivyVersion() {
+        const currentVersion = this.getInstalledTrivyVersion();
+        if (currentVersion) {
+            vscode.window.showInformationMessage(`Current Trivy version is ${currentVersion}`);
+        }
+    }
+
+    private workspaceScan(){
         let outputChannel = this.outputChannel;
         this.outputChannel.appendLine("");
         this.outputChannel.appendLine("Running Trivy to update results");
@@ -65,14 +82,51 @@ export class TrivyWrapper {
                 setTimeout(() => { vscode.commands.executeCommand("trivy-vulnerability-scanner.refresh"); }, 250);
             });
         });
-
     }
 
-    showCurrentTrivyVersion() {
-        const currentVersion = this.getInstalledTrivyVersion();
-        if (currentVersion) {
-            vscode.window.showInformationMessage(`Current Trivy version is ${currentVersion}`);
+    private fileScan(targetFile: vscode.Uri) {
+
+        if (!this.checkTrivyInstalled()) {
+            return;
         }
+        const outputFn = `${uuid()}_results.json`;
+        const resultFile = path.join(this.resultsStoragePath, outputFn);
+        const binary = this.getBinaryPath();
+
+        let command = this.buildCommand(targetFile.fsPath, outputFn);
+        this.outputChannel.appendLine(`command: ${command}`);
+
+        var execution = child.spawn(binary, command);
+
+
+        execution.on('exit', function (code) {
+            if (code !== 0) {
+                console.log("Trivy failed to run");
+                return;
+            };
+            
+            setTimeout(() => { 				
+                if (!existsSync(resultFile)){ return; }
+
+                let content = readFileSync(resultFile, 'utf8');
+                try {
+                    const data = JSON.parse(content);
+                    if (data === null || data.results === null) {
+                        return;
+                    }
+                    console.log(path.basename(targetFile.fsPath));
+                    for(let i = 0; i < data.Results.length; i++){                        
+                        if (data.Results[i].Target.includes(path.basename(targetFile.fsPath))){
+                            let results = processResult(data.Results[i]); 
+                            applyDiagnostics(targetFile, results);
+                        }
+                    }                               
+                }	catch (error) {
+                    console.debug(`Error loading results file ${resultFile}: ${error}`);
+                }
+                
+                }, 250);
+        });
     }
 
     private getBinaryPath() {
@@ -119,10 +173,13 @@ export class TrivyWrapper {
     };
 
 
-    private buildCommand(workingPath: string): string[] {
+    private buildCommand(workingPath: string, outputFn?: string): string[] {
         const config = vscode.workspace.getConfiguration('trivy');
         var command = [];
 
+        if (typeof(outputFn) !== 'string' || outputFn.length < 1 || path.extname(outputFn) !== '.json'){
+            outputFn = `${uuid()}_results.json`;
+        }
 
         if (config.get<boolean>('debug')) {
             command.push('--debug');
@@ -152,7 +209,7 @@ export class TrivyWrapper {
         
 
         command.push('--format=json');
-        const resultsPath = path.join(this.resultsStoragePath, `${uuid()}_results.json`);
+        const resultsPath = path.join(this.resultsStoragePath, outputFn);
         command.push(`--output=${resultsPath}`);
 
         command.push(workingPath);

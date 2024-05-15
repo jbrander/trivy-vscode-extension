@@ -4,6 +4,8 @@ import * as vscode from "vscode";
 import { TrivyHelpProvider } from "./explorer/trivy_helpview";
 import { TrivyTreeViewProvider } from "./explorer/trivy_treeview";
 import { TrivyWrapper } from "./trivy_wrapper";
+import { extname } from "path";
+import { applyDiagnostics } from "./diagnostics";
 
 export function runCommand(command: string, projectRootPath: string): string {
   var child_process = require("child_process");
@@ -38,6 +40,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   var outputChannel = vscode.window.createOutputChannel("Trivy Scan");
+  let scannedFiles: string[] = [];
 
   const projectRootPath = vscode.workspace.getWorkspaceFolder;
   if (projectRootPath === undefined) {
@@ -87,6 +90,30 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }
   ));
+
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument((saveEvent) => {
+      if (saveEvent.uri.scheme === "file" && extname(saveEvent.uri.fsPath) === ".tf" && !scannedFiles.includes(saveEvent.uri.fsPath)){
+        console.log("File saved: " + saveEvent.uri.fsPath);        
+        
+        trivyWrapper.run(saveEvent.uri);
+        scannedFiles.push(saveEvent.uri.fsPath);      
+      }
+    }),
+    vscode.workspace.onDidOpenTextDocument((openEvent) => {
+      if (openEvent.uri.scheme === "file" && extname(openEvent.uri.fsPath) === ".tf" && !scannedFiles.includes(openEvent.uri.fsPath)) {
+        console.log("File opened: " + openEvent.uri.fsPath);        
+        trivyWrapper.run(openEvent.uri);
+        scannedFiles.push(openEvent.uri.fsPath);
+      }
+    }),
+    vscode.workspace.onDidChangeTextDocument((changeEvent) => {
+      if (changeEvent.document.uri.scheme === "file" && extname(changeEvent.document.uri.fsPath) === ".tf" && scannedFiles.includes(changeEvent.document.uri.fsPath) ){
+        console.log("File changed: " + changeEvent.document.uri.fsPath);
+        applyDiagnostics(changeEvent.document.uri, []);
+      }
+    })
+  );
 }
 
 // this method is called when your extension is deactivated
